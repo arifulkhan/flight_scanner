@@ -1,0 +1,16 @@
+# Copy this file to api.txt and fill in your credentials.
+# The run.sh script reads api.txt automatically.
+#
+# Option 1 (recommended): Amadeus
+# AMADEUS_CLIENT_ID=your_amadeus_client_id
+# AMADEUS_CLIENT_SECRET=your_amadeus_client_secret
+#
+# Option 2: SerpAPI
+# SERPAPI_KEY=your_serpapi_key
+#
+# Optional overrides
+# FLIGHT_PROVIDER=amadeus
+# AMADEUS_HOST=test.api.amadeus.com
+# AMADEUS_MAX_RESULTS=5
+# PREFERRED_AIRLINES=Alaska,Delta,United
+# ADMIN_TOKEN=change_me

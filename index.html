@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flight Scanner</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css?v=20260303-4" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="panel controls">
+        <h1>Flight Scanner</h1>
+        <p class="subhead">
+          Compare round-trip options across multiple start and destination airports with flexible travel dates and a simplified ground-cost model.
+        </p>
+
+        <form id="search-form" class="grid-form">
+          <label>
+            Start airport(s)
+            <input
+              id="startAirports"
+              name="startAirports"
+              type="text"
+              value="PSC, SEA, PDX, GEG"
+              placeholder="PSC, SEA, PDX, GEG"
+              required
+            />
+          </label>
+
+          <label>
+            Destination airport(s)
+            <input
+              id="destinationAirports"
+              name="destinationAirports"
+              type="text"
+              value="JFK, LGA"
+              placeholder="JFK, LGA"
+              required
+            />
+          </label>
+
+          <label>
+            Depart date
+            <input id="departDate" name="departDate" type="date" required />
+          </label>
+
+          <label>
+            Return date
+            <input id="returnDate" name="returnDate" type="date" required />
+          </label>
+
+          <label>
+            Travelers
+            <input id="travelerCount" name="travelerCount" type="number" min="1" value="1" required />
+          </label>
+
+          <label>
+            Flight API endpoint (optional)
+            <input id="flightApiBase" name="flightApiBase" type="url" value="http://127.0.0.1:8787" placeholder="https://your-api.example.com" />
+          </label>
+
+          <fieldset>
+            <legend>Cost to reach starting airport</legend>
+            <p class="cost-help">Rows are generated from your start airport list.</p>
+            <div id="cost-matrix-wrap"></div>
+          </fieldset>
+
+          <div class="actions stacked">
+            <button type="button" id="run-btn" onclick="window.__runSearch && window.__runSearch();">Run Search</button>
+            <button type="button" id="save-preset-btn" class="ghost">Save Preset</button>
+            <button type="button" id="load-preset-btn" class="ghost">Load Preset</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel results">
+        <div class="results-head">
+          <h2>Results</h2>
+          <p id="result-summary">Enter trip details and run search.</p>
+        </div>
+        <div class="toolbar">
+          <label>
+            Start airport filter
+            <select id="home-airport-filter">
+              <option value="ALL">All</option>
+            </select>
+          </label>
+
+          <label>
+            Compare using column
+            <select id="cost-column-filter">
+              <option value="totalFlightPrice">Flight price</option>
+              <option value="totalPrice">Total price</option>
+            </select>
+          </label>
+
+          <label>
+            Max selected cost ($)
+            <input id="max-cost-filter" type="number" min="0" step="1" placeholder="No limit" />
+          </label>
+
+          <div class="toolbar-actions">
+            <button type="button" id="run-search-top-btn" onclick="window.__runSearch && window.__runSearch();">Run Search</button>
+            <button type="button" id="apply-filter-btn" class="ghost">Apply Filter</button>
+            <button type="button" id="clear-filter-btn" class="ghost">Clear Filter</button>
+            <button type="button" id="export-csv-btn" class="ghost">Export CSV</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table id="results-table">
+            <thead>
+              <tr>
+                <th data-sort="departDate">Fly in date</th>
+                <th data-sort="homeAirport">Start airport</th>
+                <th data-sort="outboundDestinationAirport">Fly out airport</th>
+                <th data-sort="outboundDurationMin">Duration</th>
+                <th data-sort="outboundStopText">Itinerary</th>
+                <th data-sort="returnDate">Return date</th>
+                <th data-sort="returnDestinationAirport">Return fly in airport</th>
+                <th data-sort="returnDurationMin">Duration</th>
+                <th data-sort="returnStopText">Itinerary</th>
+                <th data-sort="airline">Airline</th>
+                <th data-sort="totalFlightPrice">Flight price</th>
+                <th data-sort="totalPrice">Total price</th>
+                <th data-sort="flightSource">Source</th>
+              </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="./app.js?v=20260303-2"></script>
+  </body>
+</html>
