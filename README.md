@@ -9,12 +9,14 @@ It includes a Python API backend plus a lightweight frontend so you can run ever
 - Comma-separated `destination airports` input (default: `JFK, LGA`)
 - Batch search and comparison across flexible date windows (`depart +/- 3 days`, `return +/- 3 days`)
 - Dynamic cost matrix with per-start-airport:
-  - one-time cost
+  - home to airport cost
+  - airport to home cost
   - per-day cost
+- Real-time total-price recalculation when ground-cost values are edited (without re-running flight search)
 - Result filtering, sorting, and CSV export
 - Simplified total price calculation:
 
-`totalPrice = flightPrice + oneTimeCost + perDayCost * tripDays`
+`totalPrice = flightPrice + homeToAirportCost + airportToHomeCost + perDayCost * tripDays`
 
 ## Run
 

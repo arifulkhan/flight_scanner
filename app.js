@@ -159,9 +159,10 @@ function readForm() {
 
   const costsByAirport = {};
   for (const airport of startAirports) {
-    const cost = costState[airport] || { oneTimeCost: 0, perDayCost: 0 };
+    const cost = costState[airport] || { homeToAirportCost: 0, airportToHomeCost: 0, perDayCost: 0 };
     costsByAirport[airport] = {
-      oneTimeCost: Number.isFinite(Number(cost.oneTimeCost)) ? Number(cost.oneTimeCost) : 0,
+      homeToAirportCost: Number.isFinite(Number(cost.homeToAirportCost)) ? Number(cost.homeToAirportCost) : 0,
+      airportToHomeCost: Number.isFinite(Number(cost.airportToHomeCost)) ? Number(cost.airportToHomeCost) : 0,
       perDayCost: Number.isFinite(Number(cost.perDayCost)) ? Number(cost.perDayCost) : 0,
     };
   }
@@ -193,7 +194,7 @@ function renderCostMatrix() {
 
   for (const airport of airports) {
     if (!costState[airport]) {
-      costState[airport] = { oneTimeCost: 0, perDayCost: 0 };
+      costState[airport] = { homeToAirportCost: 0, airportToHomeCost: 0, perDayCost: 0 };
     }
   }
 
@@ -206,7 +207,8 @@ function renderCostMatrix() {
   thead.innerHTML = `
     <tr>
       <th>Start airport</th>
-      <th>One time cost ($)</th>
+      <th>Home to airport ($)</th>
+      <th>Airport to home ($)</th>
       <th>Per day cost ($)</th>
     </tr>
   `;
@@ -223,9 +225,19 @@ function renderCostMatrix() {
           type="number"
           min="0"
           step="1"
-          value="${Number(costState[airport].oneTimeCost) || 0}"
+          value="${Number(costState[airport].homeToAirportCost) || 0}"
           data-airport="${airport}"
-          data-cost-kind="oneTimeCost"
+          data-cost-kind="homeToAirportCost"
+        />
+      </td>
+      <td>
+        <input
+          type="number"
+          min="0"
+          step="1"
+          value="${Number(costState[airport].airportToHomeCost) || 0}"
+          data-airport="${airport}"
+          data-cost-kind="airportToHomeCost"
         />
       </td>
       <td>
@@ -260,7 +272,7 @@ function renderCostMatrix() {
       }
 
       if (!costState[airport]) {
-        costState[airport] = { oneTimeCost: 0, perDayCost: 0 };
+        costState[airport] = { homeToAirportCost: 0, airportToHomeCost: 0, perDayCost: 0 };
       }
 
       const numeric = Math.max(0, Number(target.value) || 0);
@@ -276,17 +288,19 @@ function recalculateTotalsFromCostMatrix() {
   }
 
   for (const row of tableState.allRows) {
-    const costs = costState[row.homeAirport] || { oneTimeCost: 0, perDayCost: 0 };
-    const oneTimeCost = Number(costs.oneTimeCost) || 0;
+    const costs = costState[row.homeAirport] || { homeToAirportCost: 0, airportToHomeCost: 0, perDayCost: 0 };
+    const homeToAirportCost = Number(costs.homeToAirportCost) || 0;
+    const airportToHomeCost = Number(costs.airportToHomeCost) || 0;
     const perDayCost = Number(costs.perDayCost) || 0;
     const tripDays =
       Number(row.tripDays) ||
       Math.max(1, Math.ceil((new Date(row.returnDate) - new Date(row.departDate)) / (24 * 60 * 60 * 1000)));
 
-    row.oneTimeCost = oneTimeCost;
+    row.homeToAirportCost = homeToAirportCost;
+    row.airportToHomeCost = airportToHomeCost;
     row.perDayCost = perDayCost;
     row.tripDays = tripDays;
-    row.totalPrice = row.totalFlightPrice + oneTimeCost + perDayCost * tripDays;
+    row.totalPrice = row.totalFlightPrice + homeToAirportCost + airportToHomeCost + perDayCost * tripDays;
   }
 
   applyFilters();
@@ -359,7 +373,10 @@ async function buildSearchRows({ input, datePairs }) {
     }
 
     const tripDays = Math.max(1, Math.ceil((itinerary.returnDate - itinerary.departDate) / (24 * 60 * 60 * 1000)));
-    const costs = input.costsByAirport[itinerary.homeAirport] || { oneTimeCost: 0, perDayCost: 0 };
+    const costs = input.costsByAirport[itinerary.homeAirport] || { homeToAirportCost: 0, airportToHomeCost: 0, perDayCost: 0 };
+    const homeToAirportCost = Number(costs.homeToAirportCost) || 0;
+    const airportToHomeCost = Number(costs.airportToHomeCost) || 0;
+    const perDayCost = Number(costs.perDayCost) || 0;
 
     rows.push({
       departDate: itinerary.departDate,
@@ -373,10 +390,11 @@ async function buildSearchRows({ input, datePairs }) {
       returnStopText: flight.returnStopText,
       airline,
       tripDays,
-      oneTimeCost: costs.oneTimeCost,
-      perDayCost: costs.perDayCost,
+      homeToAirportCost,
+      airportToHomeCost,
+      perDayCost,
       totalFlightPrice: flight.totalFlightPrice,
-      totalPrice: flight.totalFlightPrice + costs.oneTimeCost + costs.perDayCost * tripDays,
+      totalPrice: flight.totalFlightPrice + homeToAirportCost + airportToHomeCost + perDayCost * tripDays,
       flightSource: flight.source,
     });
   }
@@ -703,8 +721,10 @@ function loadPreset() {
 
     if (data.costsByAirport && typeof data.costsByAirport === "object") {
       for (const [airport, values] of Object.entries(data.costsByAirport)) {
+        const legacyOneTime = Number(values.oneTimeCost) || 0;
         costState[airport] = {
-          oneTimeCost: Number(values.oneTimeCost) || 0,
+          homeToAirportCost: Number(values.homeToAirportCost) || legacyOneTime,
+          airportToHomeCost: Number(values.airportToHomeCost) || 0,
           perDayCost: Number(values.perDayCost) || 0,
         };
       }
