@@ -265,8 +265,31 @@ function renderCostMatrix() {
 
       const numeric = Math.max(0, Number(target.value) || 0);
       costState[airport][costKind] = numeric;
+      recalculateTotalsFromCostMatrix();
     });
   });
+}
+
+function recalculateTotalsFromCostMatrix() {
+  if (!Array.isArray(tableState.allRows) || tableState.allRows.length === 0) {
+    return;
+  }
+
+  for (const row of tableState.allRows) {
+    const costs = costState[row.homeAirport] || { oneTimeCost: 0, perDayCost: 0 };
+    const oneTimeCost = Number(costs.oneTimeCost) || 0;
+    const perDayCost = Number(costs.perDayCost) || 0;
+    const tripDays =
+      Number(row.tripDays) ||
+      Math.max(1, Math.ceil((new Date(row.returnDate) - new Date(row.departDate)) / (24 * 60 * 60 * 1000)));
+
+    row.oneTimeCost = oneTimeCost;
+    row.perDayCost = perDayCost;
+    row.tripDays = tripDays;
+    row.totalPrice = row.totalFlightPrice + oneTimeCost + perDayCost * tripDays;
+  }
+
+  applyFilters();
 }
 
 function syncHomeAirportFilterOptions() {
@@ -349,6 +372,9 @@ async function buildSearchRows({ input, datePairs }) {
       outboundStopText: flight.outboundStopText,
       returnStopText: flight.returnStopText,
       airline,
+      tripDays,
+      oneTimeCost: costs.oneTimeCost,
+      perDayCost: costs.perDayCost,
       totalFlightPrice: flight.totalFlightPrice,
       totalPrice: flight.totalFlightPrice + costs.oneTimeCost + costs.perDayCost * tripDays,
       flightSource: flight.source,
