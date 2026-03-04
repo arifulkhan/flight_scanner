@@ -20,9 +20,26 @@ MAX_WORKERS = int(os.getenv("MAX_WORKERS", "6"))
 # - set FLIGHT_PROVIDER=amadeus or serpapi explicitly
 # - if unset: prefer amadeus when AMADEUS creds exist; otherwise use serpapi
 FLIGHT_PROVIDER = os.getenv("FLIGHT_PROVIDER", "").strip().lower()
+PROVIDER_PRIORITY = [
+    p.strip().lower()
+    for p in os.getenv(
+        "PROVIDER_PRIORITY",
+        "scraperapi,browserless,rapidapi,serpapi",
+    ).split(",")
+    if p.strip()
+]
 
 SERPAPI_KEY = os.getenv("SERPAPI_KEY", "").strip()
 SERPAPI_BASE = "https://serpapi.com/search.json"
+SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY", "").strip()
+SCRAPERAPI_PREMIUM = os.getenv("SCRAPERAPI_PREMIUM", "1").strip().lower() in ("1", "true", "yes", "y")
+SCRAPERAPI_ULTRA_PREMIUM = os.getenv("SCRAPERAPI_ULTRA_PREMIUM", "0").strip().lower() in ("1", "true", "yes", "y")
+SCRAPERAPI_TIMEOUT_SEC = int(os.getenv("SCRAPERAPI_TIMEOUT_SEC", "20"))
+BROWSERLESS_TOKEN = os.getenv("BROWSERLESS_TOKEN", "").strip()
+BROWSERLESS_BASE = os.getenv("BROWSERLESS_BASE", "https://chrome.browserless.io").strip()
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "").strip()
+RAPIDAPI_HOST = os.getenv("RAPIDAPI_HOST", "").strip()
+RAPIDAPI_FLIGHT_PATH = os.getenv("RAPIDAPI_FLIGHT_PATH", os.getenv("RAPIDAPI_SEARCH_PATH", "")).strip()
 
 AMADEUS_HOST = os.getenv("AMADEUS_HOST", "test.api.amadeus.com").strip()
 AMADEUS_CLIENT_ID = os.getenv("AMADEUS_CLIENT_ID", "").strip()
@@ -33,6 +50,10 @@ PREFERRED_AIRLINES_RAW = os.getenv("PREFERRED_AIRLINES", "Alaska,Delta,United").
 CACHE_DB_PATH = os.getenv("CACHE_DB_PATH", "./flight_cache.sqlite3")
 CACHE_TTL_SEC = int(os.getenv("CACHE_TTL_SEC", "1800"))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
+PROVIDER_RETRY_ATTEMPTS = int(os.getenv("PROVIDER_RETRY_ATTEMPTS", "2"))
+PROVIDER_BACKOFF_BASE_SEC = float(os.getenv("PROVIDER_BACKOFF_BASE_SEC", "1.0"))
+AMADEUS_RETRY_ATTEMPTS = int(os.getenv("AMADEUS_RETRY_ATTEMPTS", "2"))
+SERPAPI_RETRY_ATTEMPTS = int(os.getenv("SERPAPI_RETRY_ATTEMPTS", "2"))
 
 CACHE_LOCK = Lock()
 TOKEN_LOCK = Lock()
@@ -107,12 +128,30 @@ def preferred_airline_tokens():
 PREFERRED_AIRLINES = preferred_airline_tokens()
 
 
+def configured_providers():
+    if FLIGHT_PROVIDER in ("scraperapi", "browserless", "rapidapi", "serpapi", "amadeus"):
+        return [FLIGHT_PROVIDER]
+
+    available = []
+    for provider in PROVIDER_PRIORITY:
+        if provider == "scraperapi" and SCRAPERAPI_KEY and SERPAPI_KEY:
+            available.append("scraperapi")
+        elif provider == "browserless" and BROWSERLESS_TOKEN and SERPAPI_KEY:
+            available.append("browserless")
+        elif provider == "rapidapi" and RAPIDAPI_KEY and RAPIDAPI_HOST and RAPIDAPI_FLIGHT_PATH:
+            available.append("rapidapi")
+        elif provider == "serpapi" and SERPAPI_KEY:
+            available.append("serpapi")
+        elif provider == "amadeus" and AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET:
+            available.append("amadeus")
+    return available
+
+
 def active_provider():
-    if FLIGHT_PROVIDER in ("amadeus", "serpapi"):
-        return FLIGHT_PROVIDER
-    if AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET:
-        return "amadeus"
-    return "serpapi"
+    providers = configured_providers()
+    if providers:
+        return providers[0]
+    return "none"
 
 
 def parse_price(value):
@@ -457,9 +496,26 @@ def is_admin_authorized(headers):
 
 def http_json(method, url, headers=None, body=None, timeout=35):
     req = Request(url, data=body, method=method, headers=headers or {})
-    with urlopen(req, timeout=timeout) as response:
-        raw = response.read().decode("utf-8")
-    return json.loads(raw)
+    try:
+        with urlopen(req, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+        return json.loads(raw)
+    except HTTPError as exc:
+        try:
+            raw = exc.read().decode("utf-8", errors="ignore").strip()
+        except Exception:
+            raw = ""
+        if raw:
+            raise HTTPError(exc.url, exc.code, f"{exc.reason} | {raw[:220]}", exc.hdrs, exc.fp)
+        raise
+
+
+def http_post_json(url, payload, headers=None, timeout=35):
+    body = json.dumps(payload).encode("utf-8")
+    merged = {"Content-Type": "application/json", "Accept": "application/json"}
+    if headers:
+        merged.update(headers)
+    return http_json("POST", url, headers=merged, body=body, timeout=timeout)
 
 
 def error_quote(provider, code, message, stop_text="Unavailable"):
@@ -575,10 +631,7 @@ def best_option_from_serp(data):
     return options[0]
 
 
-def fetch_one_way_leg_serpapi(origin, destination, date):
-    if not SERPAPI_KEY:
-        raise RuntimeError("SERPAPI_KEY is not set")
-
+def build_serpapi_flights_url(origin, destination, date):
     params = {
         "engine": "google_flights",
         "api_key": SERPAPI_KEY,
@@ -591,7 +644,31 @@ def fetch_one_way_leg_serpapi(origin, destination, date):
         "outbound_date": date,
         "deep_search": "false",
     }
-    url = f"{SERPAPI_BASE}?{urlencode(params)}"
+    return f"{SERPAPI_BASE}?{urlencode(params)}"
+
+
+def quote_from_serp_data(data, provider_name):
+    provider_error = data.get("error")
+    if provider_error:
+        text = str(provider_error)
+        if "rate limit" in text.lower() or "too many requests" in text.lower() or "run out of searches" in text.lower():
+            return error_quote(provider_name, "rate_limited", text)
+        if "auth" in text.lower() or "unauthorized" in text.lower() or "forbidden" in text.lower():
+            return error_quote(provider_name, "auth_error", text)
+        return error_quote(provider_name, "provider_error", text)
+
+    option = best_option_from_serp(data)
+    if option is None:
+        return error_quote(provider_name, "no_results", "No matching flights returned", stop_text="No result")
+    option["provider"] = provider_name
+    return option
+
+
+def fetch_one_way_leg_serpapi(origin, destination, date):
+    if not SERPAPI_KEY:
+        raise RuntimeError("SERPAPI_KEY is not set")
+
+    url = build_serpapi_flights_url(origin, destination, date)
     try:
         data = http_json(
             "GET",
@@ -603,23 +680,104 @@ def fetch_one_way_leg_serpapi(origin, destination, date):
             return error_quote("serpapi", "rate_limited", "SerpApi rate limit reached")
         if exc.code in (401, 403):
             return error_quote("serpapi", "auth_error", "SerpApi authorization failed")
-        return error_quote("serpapi", f"http_{exc.code}", f"SerpApi HTTP {exc.code}")
+        return error_quote("serpapi", f"http_{exc.code}", f"SerpApi HTTP {exc.code}: {exc.reason}")
     except URLError as exc:
         return error_quote("serpapi", "network_error", f"SerpApi network error: {exc.reason}")
     except Exception as exc:
         return error_quote("serpapi", "provider_error", f"SerpApi request failed: {exc}")
 
-    provider_error = data.get("error")
-    if provider_error:
-        text = str(provider_error)
-        if "rate limit" in text.lower() or "too many requests" in text.lower():
-            return error_quote("serpapi", "rate_limited", text)
-        return error_quote("serpapi", "provider_error", text)
+    return quote_from_serp_data(data, "serpapi")
 
-    option = best_option_from_serp(data)
-    if option is None:
-        return error_quote("serpapi", "no_results", "No matching flights returned", stop_text="No result")
-    return option
+
+def fetch_one_way_leg_scraperapi(origin, destination, date):
+    if not (SCRAPERAPI_KEY and SERPAPI_KEY):
+        raise RuntimeError("SCRAPERAPI_KEY and SERPAPI_KEY are required")
+    serp_url = build_serpapi_flights_url(origin, destination, date)
+    params = {"api_key": SCRAPERAPI_KEY, "url": serp_url}
+    if SCRAPERAPI_PREMIUM:
+        params["premium"] = "true"
+    if SCRAPERAPI_ULTRA_PREMIUM:
+        params["ultra_premium"] = "true"
+    proxy_url = "http://api.scraperapi.com/?" + urlencode(params)
+    try:
+        data = http_json(
+            "GET",
+            proxy_url,
+            headers={"Accept": "application/json", "User-Agent": "flight-planner/1.0"},
+            timeout=max(5, SCRAPERAPI_TIMEOUT_SEC),
+        )
+    except HTTPError as exc:
+        if exc.code == 429:
+            return error_quote("scraperapi", "rate_limited", f"ScraperAPI rate limit: {exc.reason}")
+        if exc.code in (401, 403):
+            return error_quote("scraperapi", "auth_error", f"ScraperAPI auth failed: {exc.reason}")
+        return error_quote("scraperapi", f"http_{exc.code}", f"ScraperAPI HTTP {exc.code}: {exc.reason}")
+    except URLError as exc:
+        return error_quote("scraperapi", "network_error", f"ScraperAPI network error: {exc.reason}")
+    except Exception as exc:
+        return error_quote("scraperapi", "provider_error", f"ScraperAPI request failed: {exc}")
+    return quote_from_serp_data(data, "scraperapi")
+
+
+def fetch_one_way_leg_browserless(origin, destination, date):
+    if not (BROWSERLESS_TOKEN and SERPAPI_KEY):
+        raise RuntimeError("BROWSERLESS_TOKEN and SERPAPI_KEY are required")
+    serp_url = build_serpapi_flights_url(origin, destination, date)
+    url = f"{BROWSERLESS_BASE.rstrip('/')}/content?token={BROWSERLESS_TOKEN}"
+    try:
+        data = http_post_json(url, {"url": serp_url}, timeout=35)
+    except HTTPError as exc:
+        if exc.code in (401, 403):
+            return error_quote("browserless", "auth_error", f"Browserless auth failed: {exc.reason}")
+        if exc.code == 429:
+            return error_quote("browserless", "rate_limited", f"Browserless rate limit: {exc.reason}")
+        return error_quote("browserless", f"http_{exc.code}", f"Browserless HTTP {exc.code}: {exc.reason}")
+    except URLError as exc:
+        return error_quote("browserless", "network_error", f"Browserless network error: {exc.reason}")
+    except Exception as exc:
+        return error_quote("browserless", "provider_error", f"Browserless request failed: {exc}")
+    return quote_from_serp_data(data, "browserless")
+
+
+def fetch_one_way_leg_rapidapi(origin, destination, date):
+    if not (RAPIDAPI_KEY and RAPIDAPI_HOST and RAPIDAPI_FLIGHT_PATH):
+        raise RuntimeError("RAPIDAPI_KEY/RAPIDAPI_HOST/RAPIDAPI_FLIGHT_PATH are required")
+    params = {
+        "engine": "google_flights",
+        "hl": "en",
+        "gl": "us",
+        "currency": "USD",
+        "type": "2",
+        "departure_id": origin,
+        "arrival_id": destination,
+        "outbound_date": date,
+        "deep_search": "false",
+    }
+    sep = "&" if "?" in RAPIDAPI_FLIGHT_PATH else "?"
+    url = f"https://{RAPIDAPI_HOST}{RAPIDAPI_FLIGHT_PATH}{sep}{urlencode(params)}"
+    try:
+        data = http_json(
+            "GET",
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "flight-planner/1.0",
+                "X-RapidAPI-Key": RAPIDAPI_KEY,
+                "X-RapidAPI-Host": RAPIDAPI_HOST,
+            },
+            timeout=35,
+        )
+    except HTTPError as exc:
+        if exc.code in (401, 403):
+            return error_quote("rapidapi", "auth_error", f"RapidAPI auth failed: {exc.reason}")
+        if exc.code == 429:
+            return error_quote("rapidapi", "rate_limited", f"RapidAPI rate limit: {exc.reason}")
+        return error_quote("rapidapi", f"http_{exc.code}", f"RapidAPI HTTP {exc.code}: {exc.reason}")
+    except URLError as exc:
+        return error_quote("rapidapi", "network_error", f"RapidAPI network error: {exc.reason}")
+    except Exception as exc:
+        return error_quote("rapidapi", "provider_error", f"RapidAPI request failed: {exc}")
+    return quote_from_serp_data(data, "rapidapi")
 
 
 # ---------- Amadeus provider ----------
@@ -784,22 +942,105 @@ def fetch_one_way_leg_amadeus(origin, destination, date):
 
 
 def fetch_one_way_leg(origin, destination, date):
-    provider = active_provider()
+    quote, _status = fetch_one_way_leg_with_status(origin, destination, date)
+    return quote
+
+
+def provider_chain_for_leg():
+    chain = configured_providers()
+    if chain:
+        return chain
+    # Legacy fallback path when explicit provider selected but missing config.
+    primary = active_provider()
+    return [primary] if primary != "none" else []
+
+
+def max_attempts_for_provider(provider):
     if provider == "amadeus":
-        try:
-            quote = fetch_one_way_leg_amadeus(origin, destination, date)
-            if quote.get("price") is not None:
-                return quote
-            if SERPAPI_KEY:
-                return fetch_one_way_leg_serpapi(origin, destination, date)
-            return quote
-        except Exception:
-            if SERPAPI_KEY:
-                return fetch_one_way_leg_serpapi(origin, destination, date)
-            raise
+        return max(1, AMADEUS_RETRY_ATTEMPTS)
+    if provider == "serpapi":
+        return max(1, SERPAPI_RETRY_ATTEMPTS)
+    return max(1, PROVIDER_RETRY_ATTEMPTS)
+
+
+def run_provider_leg(provider, origin, destination, date):
+    if provider == "scraperapi":
+        return fetch_one_way_leg_scraperapi(origin, destination, date)
+    if provider == "browserless":
+        return fetch_one_way_leg_browserless(origin, destination, date)
+    if provider == "rapidapi":
+        return fetch_one_way_leg_rapidapi(origin, destination, date)
+    if provider == "amadeus":
+        return fetch_one_way_leg_amadeus(origin, destination, date)
     if provider == "serpapi":
         return fetch_one_way_leg_serpapi(origin, destination, date)
     raise RuntimeError(f"Unsupported provider: {provider}")
+
+
+def quote_is_retryable(quote):
+    code = str((quote or {}).get("error_code") or "").strip().lower()
+    return code in ("network_error", "provider_error", "rate_limited", "auth_error") or code.startswith("http_")
+
+
+def fetch_one_way_leg_with_status(origin, destination, date):
+    chain = provider_chain_for_leg()
+    execution = []
+    last_quote = error_quote(active_provider(), "provider_error", "No provider executed")
+
+    for provider in chain:
+        attempts = max_attempts_for_provider(provider)
+        step = {
+            "provider": provider,
+            "attempts": 0,
+            "outcome": "not_run",
+            "message": "",
+            "result_price": None,
+            "retries": [],
+        }
+        start = time.time()
+        provider_quote = None
+
+        for attempt in range(1, attempts + 1):
+            step["attempts"] = attempt
+            try:
+                provider_quote = run_provider_leg(provider, origin, destination, date)
+            except Exception as exc:
+                provider_quote = error_quote(provider, "provider_error", str(exc))
+
+            if provider_quote.get("price") is not None:
+                step["outcome"] = "success"
+                step["message"] = f"{provider} success on attempt {attempt}"
+                step["result_price"] = provider_quote.get("price")
+                break
+
+            if attempt < attempts and quote_is_retryable(provider_quote):
+                backoff_sec = PROVIDER_BACKOFF_BASE_SEC * (2 ** (attempt - 1))
+                step["retries"].append(
+                    {
+                        "attempt": attempt,
+                        "reason": provider_quote.get("error_message") or provider_quote.get("error_code") or "provider error",
+                        "backoff_sec": round(backoff_sec, 2),
+                    }
+                )
+                if backoff_sec > 0:
+                    time.sleep(backoff_sec)
+                continue
+            break
+
+        if provider_quote is None:
+            provider_quote = error_quote(provider, "provider_error", "Unknown provider result")
+
+        if step["outcome"] != "success":
+            step["outcome"] = "failed"
+            step["message"] = provider_quote.get("error_message") or "Provider returned no result"
+        step["duration_ms"] = int((time.time() - start) * 1000)
+        execution.append(step)
+        last_quote = provider_quote
+
+        if provider_quote.get("price") is not None:
+            return provider_quote, execution
+
+    return last_quote, execution
 
 
 def itinerary_key(item):
@@ -842,6 +1083,7 @@ def process_batch(itineraries):
         leg_queries[ret_leg] = None
 
     results = {}
+    leg_execution = {}
     cache_hits = 0
     cache_misses = 0
     to_fetch = []
@@ -850,6 +1092,17 @@ def process_batch(itineraries):
         cached = cache_get_leg(leg)
         if cached is not None:
             results[leg] = cached
+            leg_execution[leg] = [
+                {
+                    "provider": cached.get("provider", "unknown"),
+                    "attempts": 0,
+                    "outcome": "cached",
+                    "message": "cache hit",
+                    "result_price": cached.get("price"),
+                    "retries": [],
+                    "duration_ms": 0,
+                }
+            ]
             cache_hits += 1
         else:
             to_fetch.append(leg)
@@ -858,17 +1111,29 @@ def process_batch(itineraries):
     if to_fetch:
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             futures = {
-                pool.submit(fetch_one_way_leg, leg[0], leg[1], leg[2]): leg
+                pool.submit(fetch_one_way_leg_with_status, leg[0], leg[1], leg[2]): leg
                 for leg in to_fetch
             }
             for future in as_completed(futures):
                 leg = futures[future]
                 try:
-                    quote = future.result()
+                    quote, execution = future.result()
                 except Exception:
                     quote = error_quote(active_provider(), "provider_error", "Unhandled provider failure")
+                    execution = [
+                        {
+                            "provider": active_provider(),
+                            "attempts": 1,
+                            "outcome": "failed",
+                            "message": "Unhandled provider failure",
+                            "result_price": None,
+                            "retries": [],
+                            "duration_ms": 0,
+                        }
+                    ]
 
                 results[leg] = quote
+                leg_execution[leg] = execution
                 if quote.get("price") is not None:
                     cache_set_leg(leg, quote)
 
@@ -924,14 +1189,42 @@ def process_batch(itineraries):
             }
         )
 
+    execution_payload = []
+    for leg, steps in leg_execution.items():
+        execution_payload.append(
+            {
+                "origin": leg[0],
+                "destination": leg[1],
+                "date": leg[2],
+                "steps": steps,
+            }
+        )
+
+    provider_errors = []
+    for leg_item in execution_payload:
+        for step in leg_item.get("steps", []):
+            if step.get("outcome") == "failed":
+                provider_errors.append(
+                    {
+                        "origin": leg_item["origin"],
+                        "destination": leg_item["destination"],
+                        "date": leg_item["date"],
+                        "provider": step.get("provider"),
+                        "message": step.get("message"),
+                    }
+                )
+
     return {
         "results": payload_results,
         "provider": active_provider(),
+        "providers_attempted": provider_chain_for_leg(),
         "cache": {
             "ttl_sec": CACHE_TTL_SEC,
             "hits": cache_hits,
             "misses": cache_misses,
         },
+        "provider_errors": provider_errors,
+        "execution_status": execution_payload,
     }
 
 
@@ -952,12 +1245,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
+            providers = configured_providers()
             self._json(
                 200,
                 {
                     "ok": True,
                     "provider": active_provider(),
+                    "providers_configured": providers,
                     "serpapi_key_present": bool(SERPAPI_KEY),
+                    "scraperapi_key_present": bool(SCRAPERAPI_KEY),
+                    "browserless_token_present": bool(BROWSERLESS_TOKEN),
+                    "rapidapi_key_present": bool(RAPIDAPI_KEY),
+                    "rapidapi_host_present": bool(RAPIDAPI_HOST),
+                    "rapidapi_flight_path_present": bool(RAPIDAPI_FLIGHT_PATH),
                     "amadeus_client_id_present": bool(AMADEUS_CLIENT_ID),
                     "amadeus_client_secret_present": bool(AMADEUS_CLIENT_SECRET),
                     "preferred_airlines": PREFERRED_AIRLINES,
@@ -982,12 +1282,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "Not found"})
             return
 
-        provider = active_provider()
-        if provider == "serpapi" and not SERPAPI_KEY:
-            self._json(500, {"error": "SERPAPI_KEY is not configured"})
-            return
-        if provider == "amadeus" and (not AMADEUS_CLIENT_ID or not AMADEUS_CLIENT_SECRET):
-            self._json(500, {"error": "AMADEUS_CLIENT_ID/AMADEUS_CLIENT_SECRET are not configured"})
+        providers = provider_chain_for_leg()
+        if not providers:
+            self._json(500, {"error": "No configured providers. Set PROVIDER_PRIORITY and provider credentials in api.txt"})
             return
 
         try:

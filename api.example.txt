@@ -8,9 +8,25 @@
 # Option 2: SerpAPI
 # SERPAPI_KEY=your_serpapi_key
 #
+# Optional provider chain (same style as stay_scanner):
+# PROVIDER_PRIORITY=scraperapi,browserless,rapidapi,serpapi,amadeus
+# SCRAPERAPI_KEY=your_scraperapi_key
+# SCRAPERAPI_PREMIUM=1
+# SCRAPERAPI_ULTRA_PREMIUM=0
+# SCRAPERAPI_TIMEOUT_SEC=20
+# BROWSERLESS_TOKEN=your_browserless_token
+# BROWSERLESS_BASE=https://chrome.browserless.io
+# RAPIDAPI_KEY=your_rapidapi_key
+# RAPIDAPI_HOST=your_rapidapi_host
+# RAPIDAPI_FLIGHT_PATH=/your/rapidapi/flight/path
+#
 # Optional overrides
 # FLIGHT_PROVIDER=amadeus
 # AMADEUS_HOST=test.api.amadeus.com
 # AMADEUS_MAX_RESULTS=5
+# AMADEUS_RETRY_ATTEMPTS=2
+# SERPAPI_RETRY_ATTEMPTS=2
+# PROVIDER_RETRY_ATTEMPTS=2
+# PROVIDER_BACKOFF_BASE_SEC=1.0
 # PREFERRED_AIRLINES=Alaska,Delta,United
 # ADMIN_TOKEN=change_me
