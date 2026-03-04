@@ -24,7 +24,7 @@ PROVIDER_PRIORITY = [
     p.strip().lower()
     for p in os.getenv(
         "PROVIDER_PRIORITY",
-        "scraperapi,browserless,rapidapi,serpapi",
+        "serpapi,rapidapi,scraperapi,browserless,amadeus",
     ).split(",")
     if p.strip()
 ]
@@ -152,6 +152,54 @@ def active_provider():
     if providers:
         return providers[0]
     return "none"
+
+
+def provider_validation():
+    checks = []
+    checks.append(
+        {
+            "provider": "serpapi",
+            "configured": bool(SERPAPI_KEY),
+            "required": ["SERPAPI_KEY"],
+            "free_tier_notes": "Free tier is limited; quota exhaustion is common for frequent searches.",
+        }
+    )
+    checks.append(
+        {
+            "provider": "rapidapi",
+            "configured": bool(RAPIDAPI_KEY and RAPIDAPI_HOST and RAPIDAPI_FLIGHT_PATH),
+            "required": ["RAPIDAPI_KEY", "RAPIDAPI_HOST", "RAPIDAPI_FLIGHT_PATH (or RAPIDAPI_SEARCH_PATH alias)"],
+            "free_tier_notes": "Depends on subscribed API listing; monthly quotas on free/basic plans are often low.",
+        }
+    )
+    checks.append(
+        {
+            "provider": "scraperapi",
+            "configured": bool(SCRAPERAPI_KEY and SERPAPI_KEY),
+            "required": ["SCRAPERAPI_KEY", "SERPAPI_KEY"],
+            "free_tier_notes": "Proxying API endpoints may fail for protected targets; premium/ultra_premium may be required.",
+        }
+    )
+    checks.append(
+        {
+            "provider": "browserless",
+            "configured": bool(BROWSERLESS_TOKEN and SERPAPI_KEY),
+            "required": ["BROWSERLESS_TOKEN", "SERPAPI_KEY", "BROWSERLESS_BASE(optional)"],
+            "free_tier_notes": "May require paid plan for reliable use; API-JSON proxying via /content can be unstable.",
+        }
+    )
+    checks.append(
+        {
+            "provider": "amadeus",
+            "configured": bool(AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET),
+            "required": ["AMADEUS_CLIENT_ID", "AMADEUS_CLIENT_SECRET", "AMADEUS_HOST(optional)"],
+            "free_tier_notes": "Self-service test environment available but requires account setup.",
+        }
+    )
+    return {
+        "checks": checks,
+        "recommended_free_tier_order": ["serpapi", "rapidapi", "scraperapi", "browserless", "amadeus"],
+    }
 
 
 def parse_price(value):
@@ -707,6 +755,20 @@ def fetch_one_way_leg_scraperapi(origin, destination, date):
             timeout=max(5, SCRAPERAPI_TIMEOUT_SEC),
         )
     except HTTPError as exc:
+        reason = str(exc.reason or "")
+        lower_reason = reason.lower()
+        if "no request data available for" in lower_reason:
+            return error_quote(
+                "scraperapi",
+                "unsupported_target",
+                "ScraperAPI cannot proxy this SerpAPI endpoint for the request.",
+            )
+        if "protected domains may require" in lower_reason:
+            return error_quote(
+                "scraperapi",
+                "unsupported_target",
+                "ScraperAPI target requires premium/ultra_premium access or different target URL.",
+            )
         if exc.code == 429:
             return error_quote("scraperapi", "rate_limited", f"ScraperAPI rate limit: {exc.reason}")
         if exc.code in (401, 403):
@@ -715,6 +777,19 @@ def fetch_one_way_leg_scraperapi(origin, destination, date):
     except URLError as exc:
         return error_quote("scraperapi", "network_error", f"ScraperAPI network error: {exc.reason}")
     except Exception as exc:
+        text = str(exc or "")
+        if "No request data available for" in text:
+            return error_quote(
+                "scraperapi",
+                "unsupported_target",
+                "ScraperAPI cannot proxy this SerpAPI endpoint for the request.",
+            )
+        if "Protected domains may require" in text:
+            return error_quote(
+                "scraperapi",
+                "unsupported_target",
+                "ScraperAPI target requires premium/ultra_premium access or different target URL.",
+            )
         return error_quote("scraperapi", "provider_error", f"ScraperAPI request failed: {exc}")
     return quote_from_serp_data(data, "scraperapi")
 
@@ -979,6 +1054,8 @@ def run_provider_leg(provider, origin, destination, date):
 
 def quote_is_retryable(quote):
     code = str((quote or {}).get("error_code") or "").strip().lower()
+    if code in ("unsupported_target", "no_results", "unpriced"):
+        return False
     return code in ("network_error", "provider_error", "rate_limited", "auth_error") or code.startswith("http_")
 
 
@@ -1246,12 +1323,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             providers = configured_providers()
+            validation = provider_validation()
             self._json(
                 200,
                 {
                     "ok": True,
                     "provider": active_provider(),
+                    "provider_priority": PROVIDER_PRIORITY,
                     "providers_configured": providers,
+                    "provider_validation": validation,
                     "serpapi_key_present": bool(SERPAPI_KEY),
                     "scraperapi_key_present": bool(SCRAPERAPI_KEY),
                     "browserless_token_present": bool(BROWSERLESS_TOKEN),
@@ -1264,6 +1344,16 @@ class Handler(BaseHTTPRequestHandler):
                     "cache_db_path": CACHE_DB_PATH,
                     "cache_ttl_sec": CACHE_TTL_SEC,
                     "admin_token_required": bool(ADMIN_TOKEN),
+                },
+            )
+            return
+        if self.path == "/providers/validate":
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "provider_priority": PROVIDER_PRIORITY,
+                    **provider_validation(),
                 },
             )
             return

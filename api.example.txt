@@ -8,8 +8,8 @@
 # Option 2: SerpAPI
 # SERPAPI_KEY=your_serpapi_key
 #
-# Optional provider chain (same style as stay_scanner):
-# PROVIDER_PRIORITY=scraperapi,browserless,rapidapi,serpapi,amadeus
+# Optional provider chain (free-tier optimized for flights):
+# PROVIDER_PRIORITY=serpapi,rapidapi,scraperapi,browserless,amadeus
 # SCRAPERAPI_KEY=your_scraperapi_key
 # SCRAPERAPI_PREMIUM=1
 # SCRAPERAPI_ULTRA_PREMIUM=0
